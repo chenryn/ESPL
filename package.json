@@ -1,0 +1,13 @@
+{
+    "name": "espl",
+    "version": "1.0.0",
+    "description": "Elastic Search Processing Language",
+    "main": "compiler.js",
+    "scripts": {
+        "test": "echo \"Error: no test specified\" && exit 1"
+    },
+    "author": "",
+    "dependencies": {
+        "pegjs": "~0.8.0"
+    }
+}

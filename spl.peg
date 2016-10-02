@@ -1,0 +1,302 @@
+/* 
+ * Search Process Language for Elasticsearch
+ */
+
+start
+  = first:QueryCommand rest:(_? '|' _? TailCommand)* _? {
+    var dsl = {
+        "query" : { "query_string" : { "query" : first } },
+    };
+    if (!!rest) {
+      dsl["aggs"] = rest[0][3];
+    }
+    return dsl;
+  }
+
+TailCommand
+  = StatsCommand
+  / BinCommand
+  / SigTermCommand
+  // EvalCommand
+
+// Glue
+SEP
+  = '='
+
+_ "WhitespaceOrComment"
+  = Whitespace? Comment Whitespace?
+  / Whitespace
+
+Comment
+  = '#' [^\r\n]*
+
+Whitespace
+  = WhitespaceChar+
+
+WhitespaceChar
+  = [ \t\n\r]
+
+
+// Field names and values
+Field
+  = $[a-zA-Z0-9\._\-]+
+
+Value
+  = $[a-zA-Z0-9\._\-]+
+
+Boolean
+  = 'true' { return true; }
+  / 'false' { return false; }
+
+Integer
+  = num:[0-9]+ { return parseInt(num.join('')); }
+
+
+// Special values
+WildCardValue
+  = '"' chrs:DoubleQuotedChar* '"' { return chrs.join(''); }
+  / "'" chrs:SingleQuotedChar* "'" { return chrs.join(''); }
+  / chunks:WildCardChunk* { return chunks; }
+
+WildCardChunk
+  = '*' { return '*'; }
+  / '?' { return '?'; }
+  / chrs:EscapedChar+ { return chrs.join(''); }
+
+EscapedChar
+  = '\\' chr:MetaChar { return chr; }
+  / SpecialChar
+  / !MetaChar chr:. { return chr; }
+
+LiteralValue
+  = '"' chrs:DoubleQuotedChar* '"' { return chrs.join(''); }
+  / "'" chrs:SingleQuotedChar* "'" { return chrs.join(''); }
+  / chrs:LiteralChar+ { return chrs.join(''); }
+
+LiteralChar
+  = EscapedChar
+
+DoubleQuotedChar
+  = '\\"' { return '"'; }
+  / SpecialChar
+  / '\\'? chr:[^"] { return chr; }
+
+SingleQuotedChar
+  = "\\'" { return "'"; }
+  / chr:[^'] { return chr; }
+
+MetaChar
+  = chr:WhitespaceChar { return chr[0]; }
+  / '(' / ')'
+  / '{' / '}'
+  / '[' / ']'
+  / '+'
+  / '-'
+  / ':'
+  / '\\'
+  / '/'
+  / '@'
+  / '^'
+  / '|'
+  / '"'
+  / "'"
+  / '*'
+  / '?'
+
+SpecialChar
+  = '\\n' { return "\n"; }
+  / '\\r' { return "\r"; }
+  / '\\t' { return "\t"; }
+
+
+// Query command
+QueryCommand
+  = query:QueryExpression { return query; }
+  / '*' { return {"match_all" : {}}; }
+
+QueryExpression
+  = QueryOR
+
+QueryOR
+  = a:QueryAND b:(_ 'OR' _ QueryAND)* {
+    if(!!(b) && !!(b.length)) {
+      return '(' + a + ' OR ' + b + ')';
+    }
+    return a;
+  }
+
+QueryAND
+  =  a:QueryNOT b:((_ 'AND')? _ QueryNOT)* {
+    if(!!(b) && !!(b.length)) {
+      return a + ' AND ' + b;
+    }
+    return a;
+  }
+
+QueryNOT
+  =  a:QueryUnaryNOT b:(_ 'NOT' _ QueryUnaryNOT)? {
+    if(!!(b) && !!(b.length)) {
+      return a + ' NOT ' + b;
+    }
+    return a;
+  }
+
+QueryUnaryNOT
+  = neg:'-'? '(' _? expr:QueryExpression _? ')' {
+    if(neg) {
+      return '-(' + expr + ')';
+    }
+    return expr;
+  }
+  / neg:'-'? clause:QueryClause {
+    if(neg) {
+      clause = '-' + clause;
+    }
+    return clause;
+  }
+
+QueryClause
+  = '_exists_' SEP field:Field { return '_exists_:' + field; }
+
+  / '_missing_' SEP field:Field { return '_missing_:' + field; }
+
+  / field:Field SEP a:QueryRangeLow _? lo:QueryRangeValue _ 'TO' _ hi:QueryRangeValue _? b:QueryRangeHigh
+     { return field + ':' + a +  lo + ' TO ' + hi + b; }
+
+  / field:Field SEP '^' val:LiteralValue { return field + ':^' + val; }
+
+  / field:Field SEP '/' regex:RegexValue '/' { return field + ':/' + regex + '/'; }
+
+  / field:Field SEP '(' _? first:WildCardValue rest:(_ WildCardValue)* _? ')' {
+    return [first, rest];
+  }
+
+  / field:Field SEP val:WildCardValue { return field + ':' + val; }
+
+RegexValue
+  = chrs:RegexChar* { return chrs.join(''); }
+
+RegexChar
+  = '\\/' { return '/'; }
+  / [^/]
+
+QueryRangeLow
+  = '['
+  / '{'
+
+QueryRangeHigh
+  = ']'
+  / '}'
+
+QueryRangeValue
+  = '*' { return null; }
+  / LiteralValue
+
+
+// Stats command
+StatsCommand
+  = 'stats' _ func:StatsFunction byGroups:(_ 'by' _ Groups)? {
+    var aggs = {};
+    if (!!byGroups) {
+      var by = byGroups[3];
+      var i = 0;
+      function setTerms(aggs, i) {
+          aggs[i] = {"terms":{"field":by[i]},"aggs":{}};
+          if (i < by.length-1) {
+              setTerms(aggs[i].aggs, i+1);
+          } else {
+              aggs[i].aggs[i] = func;
+              return;
+          }
+      }
+      setTerms(aggs, i);
+    } else {
+      aggs[0] = func;
+    }
+    return aggs;
+  }
+
+StatsFunction
+  = type:AggType '(' _? field:(Field) _? ')' {
+      var agg = {};
+      if (typeof(type) == 'number') {
+          agg["percentiles"] = {"field": field, "percents": [type]};
+      } else {
+          agg[type] = {"field": field};
+      }
+      return agg;
+  }
+
+AggType
+  = 'count' { return 'terms'; }
+  / 'dc' { return 'cardinality'; }
+  / 'min' { return 'min'; }
+  / 'max' { return 'max'; }
+  / 'avg' { return 'avg'; }
+  / 'sum' { return 'sum'; }
+  / 'pct' pct:(Integer) { return pct; }
+  / 'es' { return 'extended_stats'; }
+
+AggSettings
+  = first:AggSetting rest:MoreAggSettings* {
+    var arr = [first].concat(rest);
+      var obj = {};
+      for (var i=0; i<arr.length; i++) {
+          obj = Object.assign(obj, arr[i]);
+      }
+      return obj;
+  }
+
+MoreAggSettings
+  = ','? _? arg:AggSetting { return arg;  }
+
+AggSetting
+  = field:Field SEP val:Value { var kv = {}; kv[field] = val; return kv; }
+
+Groups
+  = first:Field rest:MoreGroups* {
+    return [first].concat(rest);
+  }
+
+MoreGroups
+  = ','? _? field:Field { return field;  }
+
+SigTermCommand
+  = 'findkeywords' _ field:(Field)? _ 'by' _ by:Groups {
+    var aggs = {};
+    var func = {"significant_terms":{"field": field}};
+    if (!!byGroups) {
+      var by = byGroups[3];
+      var i = 0;
+      function setTerms(aggs, i) {
+          aggs[i] = {"terms":{"field":by[i]},"aggs":{}};
+          if (i < by.length-1) {
+              setTerms(aggs[i].aggs, i+1);
+          } else {
+              aggs[i].aggs[i] = func;
+              return;
+          }
+      }
+      setTerms(aggs, i);
+    } else {
+      aggs[0] = func;
+    }
+    return aggs;
+  }
+
+BinCommand
+  = 'bucket' _ field:Field _ 'span' SEP interval:Interval _? '|' _? stats:(StatsCommand / SigTermCommand / PredictCommand) {
+      return {"aggs":{"bucket":{"date_histogram":{"field":field,"interval":interval},"aggs":stats}}};
+  }
+
+Interval
+  = chr:(Integer [smhdwy]) { return chr.join(''); }
+
+PredictCommand
+  = 'predict' _ func:StatsFunction _ 'window' SEP window:Integer settings:(_ AggSettings)* _? {
+    var aggs = {};
+    aggs[0] = func;
+    aggs['predict'] = {"moving_avg":{"bucket_path":"0","window":window,"model": "holt_winters","settings": settings[0][1]}};
+    return aggs;
+  }
+
