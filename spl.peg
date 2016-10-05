@@ -2,21 +2,33 @@
  * Search Process Language for Elasticsearch
  */
 
+{
+    var TIMESTAMP_FIELD = '@timestamp';
+    var RAW_MESSAGE_FIELD = 'message';
+}
+
 start
   = first:QueryCommand rest:(_? '|' _? TailCommand)* _? {
-    var dsl = {
-        "query" : { "query_string" : { "query" : first } },
-    };
-    if (!!rest) {
-      dsl["aggs"] = rest[0][3];
+    var dsl = { "query" : first };
+    var postProcess;
+    if (!!rest && !!rest.length) {
+      var cmd = rest[0][3];
+      if (!!Array.isArray(cmd)) {
+        dsl["aggs"] = cmd[0];
+        postProcess = cmd[1];
+      } else {
+        dsl["aggs"] = cmd;
+      }
     }
-    return dsl;
+    return [dsl, postProcess];
   }
 
 TailCommand
   = StatsCommand
   / BinCommand
   / SigTermCommand
+  / TransCommand
+  // JoinCommand
   // EvalCommand
 
 // Glue
@@ -111,7 +123,9 @@ SpecialChar
 
 // Query command
 QueryCommand
-  = query:QueryExpression { return query; }
+  = query:QueryExpression {
+    return {"query_string": {"query": query, "default_field": RAW_MESSAGE_FIELD}};
+  }
   / '*' { return {"match_all" : {}}; }
 
 QueryExpression
@@ -193,7 +207,7 @@ QueryRangeValue
   / LiteralValue
 
 
-// Stats command
+// Direct Aggs command
 StatsCommand
   = 'stats' _ func:StatsFunction byGroups:(_ 'by' _ Groups)? {
     var aggs = {};
@@ -262,25 +276,20 @@ MoreGroups
   = ','? _? field:Field { return field;  }
 
 SigTermCommand
-  = 'findkeywords' _ field:(Field)? _ 'by' _ by:Groups {
+  = 'findkeywords' _ field:Field _ 'by' _ by:Groups {
     var aggs = {};
     var func = {"significant_terms":{"field": field}};
-    if (!!byGroups) {
-      var by = byGroups[3];
-      var i = 0;
-      function setTerms(aggs, i) {
-          aggs[i] = {"terms":{"field":by[i]},"aggs":{}};
-          if (i < by.length-1) {
-              setTerms(aggs[i].aggs, i+1);
-          } else {
-              aggs[i].aggs[i] = func;
-              return;
-          }
-      }
-      setTerms(aggs, i);
-    } else {
-      aggs[0] = func;
+    var i = 0;
+    function setTerms(aggs, i) {
+        aggs[i] = {"terms":{"field":by[i]},"aggs":{}};
+        if (i < by.length-1) {
+            setTerms(aggs[i].aggs, i+1);
+        } else {
+            aggs[i].aggs[i] = func;
+            return;
+        }
     }
+    setTerms(aggs, i);
     return aggs;
   }
 
@@ -300,3 +309,46 @@ PredictCommand
     return aggs;
   }
 
+// Post-Process Commands
+TransCommand
+  = 'transaction' _ field:Field startswith:(_ 'startswith' SEP WildCardValue)? endswith:(_ 'endswith' SEP WildCardValue)? maxevents:(_ 'maxevents' SEP Integer)? _? {
+    var topHitsSize = 3;
+    var groupSize = 100;
+    var startsWithChar, endsWithChar;
+    var aggs = {};
+    if (!!maxevents) { topHitsSize = maxevents[0][3] }
+    if (!!startswith) { startsWithChar = startswith[0][3] }
+    if (!!endswith) { endsWithChar = endswith[0][3] }
+    aggs['transId'] = {"terms":{"field":field,"size":groupSize},"aggs":{}};
+    aggs['transId']['aggs'] = {"transHits":{"top_hits":{"sort":TIMESTAMP_FIELD,"size":topHitsSize}}};
+
+    var postProcess = function(data) {
+      var transaction = data.aggregations.transId.buckets;
+      var transHits = [];
+      for (var i=0; i<transaction.length; i++) {
+        var topHits = transaction[i].transHits.hits.hits;
+        var results = [];
+        for (var i=0; i<topHits.length; i++) {
+          var msg = topHits[i]._source[RAW_MESSAGE_FIELD];
+          if (!!startsWithChar && !msg.indexOf(startsWithChar) && results.length == 0) {
+            break;
+          }
+          if (!!endsWithChar && !!msg.indexOf(endsWithChar)) {
+            results.push(topHits[i]._source);
+            break;
+          }
+          results.push(topHits[i]._source);
+        }
+        var count = results.length;
+        var duration = Date.parse(results[results.length-1][TIMESTAMP_FIELD]) - Date.parse(results[0][TIMESTAMP_FIELD]);
+        transHits.push({
+          count: count,
+          duration: duration,
+          results: results
+        });
+      }
+      return transHits;
+    }
+
+    return [aggs, postProcess];
+  }

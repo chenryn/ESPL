@@ -6,28 +6,29 @@ Elastic Search Processing Language
 
 There are several products using SPL syntax now: Splunk, SumoLogic, Rizhiyi, Juttle, XpoLog, Azure Search etc. Why not Elasticsearch?
 
-NOTE: _This is only a DSL parser now, it can't do anything out of ES query._
+**NOTE**: _This is only a DSL parser now, it can't do anything out of ES query._
 
 ## commands
 
 exists commands:
 
-* stats FUNCTION() [by TERM-LIST]
+* stats FUNCTION() [by FIELDS]
   * count
   * avg
   * max
   * min
   * es
-  * pct<X>
-* predict FUNCTION() window=<window> [SETTING-LIST]
-* bucket <date> span=<interval>
-* findkeywords by <TERM-LIST>
+  * pct\<X\>
+* predict FUNCTION() window=\<window\> [SETTINGS]
+* bucket <date> span=\<interval\>
+* findkeywords [FIELD] by \<FIELDS\>
+* transaction <FIELD> [startswith=STRING] [endswith=STRING] [maxevents=INT]
 
 todo commands:
 
-* dedup <X> [TERM-LIST]
+* dedup \<X\> [FIELDS]
 * eval val=PATTERN
-* fields <TERM-LIST>
+* fields \<FIELDS\>
 
 ## Example
 
@@ -57,7 +58,7 @@ would output the ES queryDSL like:
                     "aggs": {
                         "1": {
                             "percentiles": {
-                                    "field": "resp_time",
+                                "field": "resp_time",
                                 "percents": [
                                     75
                                 ]
@@ -114,6 +115,10 @@ would output the ES queryDSL like:
     }
 }
 ```
+
+## KNOWN ISSUE
+
+1. do not support full text search in query clauses.
 
 ## See Also
 
